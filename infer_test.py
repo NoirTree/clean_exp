@@ -90,6 +90,9 @@ def generate_fake_df_outside_module(n=100):
 
     return fake_df
 
+def generate_fake_df_complete(n=100):
+    return generate_fake_df_in_module(n).join(generate_fake_df_outside_module(n))
+
 ## BF infer: 若超过<threshold>, 就加入可行解, 按概率降序输出
 # @timer_with_return_value
 def infer_types_BF_srs(srs, threshold=0.6):
@@ -116,18 +119,19 @@ for i, type_dict in type_dicts_in_module.items(): # 查看问题
     print(i, type_dict)
 
 # speed: 6s, 300 rows
+"""
 start_time = time.process_time()
 type_dicts = fake_df_in_module.apply(infer_types_BF_srs)
 end_time = time.process_time()
 print("used time: %.9f"%(end_time - start_time))
+"""
 
 
-## softmax(手动)
-
+# 导入validate function所支持的标签
 import dataprep.clean
 validate_lst = [x for x in dir(dataprep.clean) if x.startswith("validate")]
 labels = [x[9:] for x in validate_lst]
-len(labels) # 118
+labels
 col_label_map = {"bic11": "bic", "bic8": "bic", "ean13": "ean", "ean8": "ean",
                  "time": "date", "unix_time": "date", "iso8601": "date",
                  "coordinate": "lat_long", "latitude": "lat_long",
@@ -136,18 +140,79 @@ col_label_map = {"bic11": "bic", "bic8": "bic", "ean13": "ean", "ean8": "ean",
                  "isbn10": "isbn", "isbn13": "isbn",
                  "ssn": "us_ssn",} # column name -> label
 
+##############################
+## 模块内有的type
+fake_df_in_module = generate_fake_df_in_module(300)
+type_dicts_in_module = fake_df_in_module.apply(infer_types_BF_srs)
+for i, type_dict in type_dicts_in_module.items(): # 查看问题
+    print(i, type_dict)
+
+type_dicts_in_module
+
 # 结果扩充为矩阵
 df_infer_in_module = pd.DataFrame(index=fake_df_in_module.columns, columns=labels)
-df_infer_in_module
-type_dicts_in_module
+# type_dicts_in_module
 for type, dicts in type_dicts_in_module.items():
-    pretype_prob = type_dicts_in_module[type]
+    pretype_prob = type_dicts_in_module[type] # still a dict
     for pretype, prob in pretype_prob.items():
             df_infer_in_module.loc[type, pretype] = prob
 df_infer_in_module
+predicted = np.nan_to_num(df_infer_in_module.to_numpy(dtype=float), nan=0).argmax(axis=1)
+predicted
 
+# 处理label list
+label_ind = []
+for type in df_infer_in_module.index:
+    try: # col_name与label一致的
+        label_ind.append(labels.index(type))
+    except: # col_name与label不一致的，经过map再加入
+        mapped_label = col_label_map[type]
+        label_ind.append(labels.index(mapped_label))
+label_ind # 每个type的真实label在labels（即columns）的第几列
+
+
+# 评价
+acc = (predicted==label_ind).sum()/len(label_ind)
+acc # 0.48
+from sklearn.metrics import precision_score, recall_score
+precision_score(label_ind, predicted, average='macro') # 0.58
+precision_score(label_ind, predicted, average='micro') # 0.48
+recall_score(label_ind, predicted, average='macro') # 0.538
+recall_score(label_ind, predicted, average='micro') # 0.48
+# macro高而micro低，也说明了咱们对罕见类别比较拿手？
+
+######################################
+## 模块内没有的types：
+fake_df_outside_module = generate_fake_df_outside_module(300)
+type_dicts_outside_module = fake_df_outside_module.apply(infer_types_BF_srs)
+for i, type_dict in type_dicts_outside_module.items(): # 一些bugs
+    print(i, type_dict)
+
+# 结果扩充为矩阵
+df_infer_outside_module = pd.DataFrame(index=fake_df_outside_module.columns, columns=labels)
+# type_dicts_in_module
+for type, dicts in type_dicts_outside_module.items():
+    pretype_prob = type_dicts_outside_module[type] # still a dict
+    for pretype, prob in pretype_prob.items():
+            df_infer_outside_module.loc[type, pretype] = prob
+df_infer_outside_module
+
+# 若非NaN的数量<labels的数量，说明被错判成某种type，为FP
+predicted_out = df_infer_outside_module.isna().sum(axis=1)==len(labels)
+label_out = [False]*len(predicted_out)
+# 评价
+precision_score(label_out, predicted_out, average='macro') # 0.5
+precision_score(label_out, predicted_out, average='micro') # 0.5
+recall_score(label_out, predicted_out, average='macro') # 0.25
+recall_score(label_out, predicted_out, average='micro') # 0.5
+# 太惨了，还不如瞎猜呢
+
+
+
+##################################
+## softmax(手动)
+df_infer_in_module
 df_infer_in_module.applymap(np.exp).sum(axis=1)
-
 # df_softmax=df_infer_in_module.applymap(np.exp)/df_infer_in_module.applymap(np.exp).sum(axis=1)[:, np.newaxis]
 numerator=df_infer_in_module.applymap(np.exp).to_numpy()
 denominator=df_infer_in_module.applymap(np.exp).sum(axis=1).to_numpy()
@@ -156,15 +221,7 @@ df_softmax = pd.DataFrame(df_softmax_np, index=fake_df_in_module.columns, column
 df_softmax.sum(axis=1) # =0的说明什么也没预测出来
 
 # 处理label list
-label_ind = []
-for type in df_softmax.index:
-    try: # col_name与label一致的
-        label_ind.append(labels.index(type))
-    except: # col_name与label不一致的，经过map再加入
-        mapped_label = col_label_map[type]
-        label_ind.append(labels.index(mapped_label))
 label_ind # 每个type的真实label在labels（即columns）的第几列
-
 
 ## cross-entropy
 ai = np.expand_dims(np.array(label_ind), axis=1)
@@ -175,8 +232,10 @@ bf_res = -np.divide(np.log(np.nan_to_num(css, nan=1e-15)).sum(), len(css))
 bf_res # 10.01
 
 ############################################
-# 模块内没有的types：
-fake_df_outside_module = generate_fake_df_outside_module(300)
-type_dicts_outside_module = fake_df_outside_module.apply(infer_types_BF_srs)
-for i, type_dict in type_dicts_outside_module.items(): # 一些bugs
-    print(i, type_dict)
+## confidence 实现
+
+# 试验：计算validate_date的confidence
+_df_for_cal_confidence = fake_df_in_module
+# 有点问题：应该是一个validate只能对应一个（或不同format的若干个），而不是这里产生的fake data
+df_pred_prob = _df_for_cal_confidence.apply(validate_date).sum(axis=0)/len(_df_for_cal_confidence)
+df_pred_prob.drop(labels=["date", "time", "unix_time", "iso8601"], inplace=True) # 删除本身
