@@ -9,7 +9,6 @@ from dataprep.clean import *
 import phonenumbers
 import os
 
-
 ## 第一层label
 def get_phone_label(srs, country_code="US"):
      '''接受一个series，返回 [phone, label]组成的DataFrame'''

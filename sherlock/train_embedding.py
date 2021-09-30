@@ -39,7 +39,7 @@ import dataprep.clean
 validate_lst = [x for x in dir(dataprep.clean) if x.startswith("validate")]
 features = [x[9:] for x in validate_lst]
 features
-n_features = len(features) # 108维
+n_features = len(features) # 一直在变。。现在是163
 
 type_foo_dict = {"address": "address",
     "iban": "iban",
@@ -197,54 +197,189 @@ class NaiveNet(nn.Module):
         assert x.shape[1]==self.num_inputs
         return self.net(x)
 
-# 测试
-# naivenet = NaiveNet(n_features, n_labels, n_features) # n_hiddens = n_features
-# X_mm = X.to_numpy(dtype=float)
-# naivenet(torch.from_numpy(X_mm).float()) # 必须有float
-
 
 # # training data
 # X_train, y_train, fake_df_train = generate_training_data(type_foo_dict, type_label_dict,
 #                            features, n=30, needed_original_data=True) # n=每种type实例数
-#
-# X_train.to_csv("X_30.csv", index = False)
-# y_train.to_csv("y_30.csv", index = False)
-# fake_df_train.to_csv("fake_df_30.csv", index = False)
-## 直接读取这个就行。n=30
-X_train = pd.read_csv("X_30.csv")
-y_train = pd.read_csv("y_30.csv")
 
+# X_train.to_csv("X_30_new.csv", index = False)
+# y_train.to_csv("y_30_new.csv", index = False)
+# fake_df_train.to_csv("fake_df_30_new.csv", index = False)
+## 直接读取这个就行。n=30
+X_train = pd.read_csv("X_30_new.csv")
+y_train = pd.read_csv("y_30_new.csv")
+
+# # test data
+# X_test, y_test, fake_df_test = generate_training_data(type_foo_dict, type_label_dict,
+#                            features, n=10, needed_original_data=True) # 每种type有10列
+#
+# X_test.to_csv("X_10_new.csv", index = False)
+# y_test.to_csv("y_10_new.csv", index = False)
+# fake_df_test.to_csv("fake_df_10_new.csv", index = False)
+
+# ## 直接读取这个就行。n=10
+X_test = pd.read_csv("X_10_new.csv")
+y_test = pd.read_csv("y_10_new.csv")
+
+
+## 预处理
 train_values = torch.from_numpy(X_train.to_numpy(dtype=float)).float()
 le = LabelEncoder()
 train_labels = le.fit_transform(y_train)
 train_labels = torch.LongTensor(train_labels).view(-1, 1)
-
-
-# # test data
-X_test, y_test, fake_df_test = generate_training_data(type_foo_dict, type_label_dict,
-                           features, n=10, needed_original_data=True) # 每种type有10列
-#
-# X_test.to_csv("X_10.csv", index = False)
-# y_test.to_csv("y_10.csv", index = False)
-# fake_df_test.to_csv("fake_df_10.csv", index = False)
-
-# ## 直接读取这个就行。n=10
-X_test = pd.read_csv("X_10.csv")
-y_test = pd.read_csv("y_10.csv")
 
 test_values = torch.from_numpy(X_test.to_numpy(dtype=float)).float()
 le = LabelEncoder()
 test_labels = le.fit_transform(y_test)
 test_labels = torch.LongTensor(test_labels).view(-1, 1)
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-## NetWork
-naivenet = NaiveNet(n_features, n_labels, n_features) # n_hiddens = n_features
-# loss & optimize
+# training
+def validation(net, valid_iter, loss, device="cpu"):
+    '''一次完整遍历。注意该函数不会把net搬到device上，只接受本来就在device上的net'''
+    net.eval()
+    l_sum = 0
+    acc_sum = 0
+    n = 0
+
+    with torch.no_grad(): # 不要训练模型！！
+        for X, y in valid_iter:
+            X = X.to(device)
+            y = y.to(device)
+
+            y_hat = net(X.float())
+            l_sum += loss(y_hat, y.view(-1, 1).squeeze()).cpu().item()
+            acc_sum += (y_hat.argmax(dim=1).view(-1, 1) == y).sum().cpu().item()
+            n += y.shape[0]
+
+    return l_sum/len(valid_iter), acc_sum/n
+
+def train(net, train_iter, valid_iter, epochs, loss, optimizer,
+          patience=5, # early-stopping
+          device="cpu",
+          plot=False,
+          needed_acc_lst=False):
+
+    trigger_times = 0 # how many times the loss is decreasing?
+    last_loss = 1000
+
+    if plot:
+        train_acc_lst, valid_acc_lst = [], []
+
+    for epoch in range(1, epochs+1):
+        net.train()
+        acc_sum = 0
+        n = 0
+        for X, y in train_iter:
+            X = X.to(device)
+            y = y.to(device)
+
+            # print(X.shape) # 测试
+            # print(X) # 测试
+            y_hat = net(X.float())
+            l = loss(y_hat, y.view(-1, 1).squeeze())
+            # grad-back-step
+            optimizer.zero_grad()
+            l.backward()
+            optimizer.step()
+
+            acc_sum += (y_hat.argmax(dim=1).view(-1, 1) == y).sum().cpu().item()
+            n += y.shape[0]
+
+        # print("one epoch ends.")
+        current_loss, valid_acc = validation(net, valid_iter, loss, device)
+        if plot:
+            train_acc_lst.append(acc_sum/n)
+            valid_acc_lst.append(valid_acc)
+        print(f"current validation loss: {current_loss}, "
+              f"validation acc {valid_acc}, train acc{acc_sum/n}")
+        if current_loss>last_loss:
+            trigger_times+=1
+            print(f"trigger_times: {trigger_times}")
+            if trigger_times>patience:
+                print("Early stopping!!")
+                return net
+        else:
+            trigger_times=0
+            print("trigger_times: 0")
+
+        last_loss=current_loss
+
+    if plot:
+        plt.plot(range(1, epochs + 1), valid_acc_lst, linestyle=':', label="valid_acc")
+        plt.plot(range(1, epochs + 1), train_acc_lst, linestyle='-', label="train_acc")
+        plt.legend()
+        plt.show()
+    if needed_acc_lst:
+        return net, train_acc_lst, valid_acc_lst
+    else:
+        return net
+
+def test(net, test_iter, device="cpu"):
+    net.eval()
+    acc_sum = 0
+    n = 0
+    with torch.no_grad():
+        for X, y in test_iter:
+            X = X.to(device)
+            y = y.to(device)
+
+            y_hat = net(X.float())
+            l = loss(y_hat, y.view(-1, 1).squeeze())
+
+            n += y.shape[0]
+            acc_sum += (y_hat.argmax(dim=1).view(-1, 1)==y).sum().cpu().item()
+
+    print(f"Test Accuracy: {acc_sum/n}")
+    return acc_sum/n
+
+num_epochs, weight_decay, batch_size, lr = 100, 1e-4, 128, 1e-4
+n_labels = 22 # 现有分类数
 loss = torch.nn.CrossEntropyLoss() # softmax + crossentropy
-optimizer = torch.optim.Adam(naivenet.parameters(), lr=1e-4, weight_decay=1e-4)
 
-# evaluate
+naivenet = NaiveNet(n_features, n_labels, n_features).to(device) # n_hiddens = n_features
+
+optimizer = torch.optim.Adam(naivenet.parameters(), lr=lr, weight_decay=weight_decay)
+
+num_epochs, weight_decay, batch_size = 100, 1e-4, 128
+dataset = torch.utils.data.TensorDataset(train_values, train_labels) # 包含train和validate
+test_set = torch.utils.data.TensorDataset(test_values, test_labels)
+# 拆分出validate
+train_set_size = int(len(train_values)*0.8)
+valid_set_size = len(train_values)-train_set_size
+train_set, valid_set = torch.utils.data.random_split(dataset, [train_set_size, valid_set_size])
+
+train_iter = torch.utils.data.DataLoader(train_set, batch_size, shuffle=True)
+test_iter = torch.utils.data.DataLoader(test_set, batch_size, shuffle=True)
+valid_iter = torch.utils.data.DataLoader(valid_set, batch_size, shuffle=True)
+
+# Train
+self_model, self_train_acc_lst, self_valid_acc_lst = train(naivenet, train_iter,
+                                            valid_iter, num_epochs,
+                                            loss, optimizer,
+                                            patience=5, device=device,
+                                            plot=True, needed_acc_lst=True)
+self_test_acc = test(naivenet, test_iter, device=device)
+
+## 和sherlock的结果花在一起(ps:数据需要运行sherlock_model.py获得)
+plt.plot(range(1, num_epochs+1), self_valid_acc_lst, linestyle=':', label="self_valid")
+plt.plot(range(1, num_epochs+1), self_train_acc_lst, linestyle=':', label="self_train")
+plt.plot(range(1, num_epochs+1), sherlock_valid_acc_lst, linestyle='-', label="sherlock_valid")
+plt.plot(range(1, num_epochs+1), sherlock_train_acc_lst, linestyle='-', label="sherlock_train")
+plt.legend()
+plt.show()
+
+
+
+
+
+
+##################### 备用，原来的train #####################
+train_l_sum, train_acc_sum, n, batch_count = 0, 0, 0, 0
+train_acc_lst, test_acc_lst = [], []
+train_loss_lst, test_loss_lst = [], []
+
 def evaluate_accuracy(data_iter, net):
     acc_sum, n = 0.0, 0
     for X, y in data_iter:
@@ -252,22 +387,11 @@ def evaluate_accuracy(data_iter, net):
         n += y.shape[0]
     return acc_sum / n
 
-# training
-num_epochs, weight_decay, batch_size = 100, 1e-4, 128
-train_dataset = torch.utils.data.TensorDataset(train_values, train_labels)
-test_dataset = torch.utils.data.TensorDataset(test_values, test_labels)
-train_iter = torch.utils.data.DataLoader(train_dataset, batch_size, shuffle=True)
-test_iter = torch.utils.data.DataLoader(test_dataset, batch_size, shuffle=True)
-
-train_l_sum, train_acc_sum, n, batch_count = 0, 0, 0, 0
-train_acc_lst, test_acc_lst = [], []
-train_loss_lst, test_loss_lst = [], []
-
-
 for epoch in range(num_epochs):
     naivenet.train() # for dropout and batch normalization
     train_l_sum, train_acc_sum, n, batch_count = 0, 0, 0, 0
     for X, y in train_iter: # X.shape = [batch_size, feature]
+        # print(X.shape)
         y_hat = naivenet(X.float())
         l = loss(y_hat, y.view(-1, 1).squeeze()) # 这里必须用squeeze是大坑
         # grad-back-step
